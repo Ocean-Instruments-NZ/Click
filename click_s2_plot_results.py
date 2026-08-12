@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-click_periodicity_plot.py
+click_s2_plot_results.py
 
-Render the periodicity grid and noise-level line produced by
-click_periodicity_process.py (a click_periodicity.data file) as an
-interactive Plotly HTML heatmap, with a noise-level line graph sharing the
-same time axis.
+Render the periodicity grid and noise-level line produced by click_s2.py
+(a click_s2.npz file) as an interactive Plotly HTML heatmap, with a
+noise-level line graph sharing the same time axis.
 
 Note: click times are Unix epoch seconds in true UTC. The .bcl filenames
 are timestamped in local time instead (~12h offset, NZ standard time) -
@@ -18,9 +17,9 @@ by reading each file's actual first record time). Pass --bcl-folder '' to
 disable.
 
 Usage:
-    python click_periodicity_plot.py [click_periodicity.data]
+    python click_s2_plot_results.py [click_s2.npz]
         [--plot-output click_periodicity.html] [--plot-decimate N]
-        [--bcl-folder Hydrophone]
+        [--bcl-folder Hydrophone] [--start-day N] [--end-day N]
 
 Requires: numpy, plotly
 """
@@ -29,13 +28,13 @@ import argparse
 import glob
 import os
 import warnings
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from bcl_to_bin import parse_filename_timestamp
+from click_s1 import parse_filename_timestamp
 
 # Above this many time columns, an un-decimated plot risks becoming huge
 # enough that browsers fail to render it usefully (a 30-day run at the 2s
@@ -44,9 +43,9 @@ MAX_PLOT_COLUMNS = 5000
 
 
 def load_periodicity_data(path):
-    """Load a click_periodicity.data file, upcasting the float16 arrays to
-    float64 (numpy math on float16 is slow and imprecise) and
-    reconstructing the deterministic interval_start time axis."""
+    """Load a click_s2.npz file, upcasting the float16 arrays to float64
+    (numpy math on float16 is slow and imprecise) and reconstructing the
+    deterministic interval_start time axis."""
     with np.load(path) as d:
         Z = d["z"].astype(np.float64)
         noise = d["noise_level"].astype(np.float64)
@@ -339,12 +338,11 @@ def plot_heatmap_html(Z, periods_ms, interval_start, output_path,
 def main():
     parser = argparse.ArgumentParser(
         description="Plot the periodicity heatmap and noise-level line "
-                     "from a click_periodicity.data file produced by "
-                     "click_periodicity_process.py."
+                     "from a click_s2.npz file produced by click_s2.py."
     )
-    parser.add_argument("input", nargs="?", default="click_periodicity.data",
+    parser.add_argument("input", nargs="?", default="click_s2.npz",
                          help="Periodicity data file (default: "
-                              "click_periodicity.data)")
+                              "click_s2.npz)")
     parser.add_argument("--plot-output", default="click_periodicity.html",
                          help="Heatmap output path (default: "
                               "click_periodicity.html)")
@@ -359,11 +357,39 @@ def main():
                               "heatmap copies the filename of the .bcl "
                               "file that contributed to it (default: "
                               "Hydrophone; pass '' to disable)")
+    parser.add_argument("--start-day", type=int, default=None,
+                         help="Limit the plot to start at this day of year "
+                              "(1-365, based on the calendar year of the "
+                              "data's first interval)")
+    parser.add_argument("--end-day", type=int, default=None,
+                         help="Limit the plot to end at this day of year "
+                              "(1-365, inclusive)")
     args = parser.parse_args()
 
     Z, noise, periods_ms, interval_start = load_periodicity_data(args.input)
     print(f"Loaded {Z.shape[0]} intervals x {Z.shape[1]} periods from "
           f"{args.input}")
+
+    if args.start_day is not None or args.end_day is not None:
+        for name, day in (("--start-day", args.start_day),
+                           ("--end-day", args.end_day)):
+            if day is not None and not (1 <= day <= 365):
+                raise SystemExit(f"{name} must be between 1 and 365")
+
+        year = datetime.fromtimestamp(interval_start[0], timezone.utc).year
+        jan1 = datetime(year, 1, 1, tzinfo=timezone.utc)
+        start_ts = ((jan1 + timedelta(days=args.start_day - 1)).timestamp()
+                    if args.start_day is not None else -np.inf)
+        end_ts = ((jan1 + timedelta(days=args.end_day)).timestamp()
+                  if args.end_day is not None else np.inf)
+
+        mask = (interval_start >= start_ts) & (interval_start < end_ts)
+        if not mask.any():
+            raise SystemExit(
+                "No data remains after applying --start-day/--end-day")
+        Z, noise, interval_start = Z[mask], noise[mask], interval_start[mask]
+        print(f"Limited to day {args.start_day or 1}-"
+              f"{args.end_day or 365} of {year}: {Z.shape[0]} intervals")
 
     # Full-resolution range, captured before any plot-only decimation, so
     # the color slider always spans the true data range rather than the

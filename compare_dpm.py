@@ -9,16 +9,18 @@ text. Optionally produce a scatter plot (PNG) with a least-squares linear
 fit line and its equation.
 
 Input formats:
-    SoundTrap (click_periodicity_dpm.csv): header row, then
-        datetime_utc,cetacean_present_minutes
+    SoundTrap (click_s3.csv): header row, then
+        datetime_utc,cetacean_present_minutes[,ici,frequency]
         2017-06-27 00:00:00+00:00,7
     CPOD (CPOD.csv): no header,
         DD/MM/YY,minutes
         27/06/17,0
 Both are daily counts; joined on date (CPOD has no time-of-day component).
+Only the first two SoundTrap columns are used, so click_s3.csv's extra ici/
+frequency columns (and clicks_dpm.csv, which lacks them) both work here.
 
 Usage:
-    python compare_dpm.py [click_periodicity_dpm.csv] [CPOD.csv]
+    python compare_dpm.py [click_s3.csv] [CPOD.csv]
         [-o report.txt] [--plot-output scatter.png]
 
 Requires: numpy, scipy, matplotlib (only if --plot-output is given)
@@ -33,10 +35,9 @@ from scipy import stats
 
 
 def load_soundtrap_csv(path):
-    """Return {date: cetacean_present_minutes} from a
-    click_periodicity_dpm.csv file. Raises if any date repeats (e.g. an
-    hourly file passed by mistake - regenerate with the default daily
-    --interval)."""
+    """Return {date: cetacean_present_minutes} from a click_s3.csv (or
+    clicks_dpm.csv) file. Raises if any date repeats (e.g. an hourly file
+    passed by mistake - regenerate with the default daily --interval)."""
     values = {}
     with open(path, newline="") as f:
         reader = csv.reader(f)
@@ -46,8 +47,8 @@ def load_soundtrap_csv(path):
             if date in values:
                 raise SystemExit(
                     f"{path} has more than one row for {date} - it looks "
-                    f"like an hourly file. Regenerate it with "
-                    f"click_periodicity_dpm.py's default daily --interval.")
+                    f"like an hourly file. Regenerate it with click_s3.py's "
+                    f"default daily --interval.")
             values[date] = int(row[1])
     return values
 
@@ -116,9 +117,8 @@ def main():
                      "scatter plot)."
     )
     parser.add_argument("soundtrap_csv", nargs="?",
-                         default="click_periodicity_dpm.csv",
-                         help="SoundTrap DPM CSV (default: "
-                              "click_periodicity_dpm.csv)")
+                         default="click_s3.csv",
+                         help="SoundTrap DPM CSV (default: click_s3.csv)")
     parser.add_argument("cpod_csv", nargs="?", default="CPOD.csv",
                          help="CPOD DPM CSV (default: CPOD.csv)")
     parser.add_argument("-o", "--output", default=None,

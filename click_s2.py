@@ -6,7 +6,7 @@ Process combined cetacean click detections (produced by click_s1.py) into
 a periodicity heatmap grid plus a per-bin noise floor and mean mid
 frequency, using a Rayleigh test (circular statistics / epoch folding)
 over a range of candidate periods. Saves the result to a compact
-click_s2.npz file for click_periodicity_plot.py to render - this way the
+click_s2.npz file for click_s2_plot_results.py to render - this way the
 (comparatively slow) processing step only has to run once, and
 re-plotting with different decimation/output settings doesn't require
 recomputing anything.
@@ -19,7 +19,7 @@ consistent phase within that interval, i.e. periodic clicking near period T.
 
 Note: click times (the .bcl files' rtime/mticks fields) are true UTC Unix
 epoch seconds. The .bcl filenames are timestamped in local time instead
-(~12h offset, NZ standard time) - see click_periodicity_plot.py's
+(~12h offset, NZ standard time) - see click_s2_plot_results.py's
 click-to-copy lookup, which reads each file's actual first record rather
 than trusting the filename.
 
@@ -34,6 +34,10 @@ Output file (click_s2.npz):
                    values in this dataset go up to ~212 kHz, well past
                    float16's ~65504 max (which silently overflows to inf).
     periods_ms   - float16, shape (n_periods,), candidate periods in ms
+    phase        - float16, shape (n_intervals, n_periods), mean resultant-
+                   vector phase (atan2(S, C)) in degrees for each Z cell -
+                   where in the candidate period's cycle clicks cluster.
+                   0 for empty bins (no special masking needed).
     t0           - float64 scalar, first bin's start time (UTC, seconds)
     interval_sec - float64 scalar, bin width in seconds
 (interval_start isn't stored - it's fully deterministic from t0/interval_sec/
@@ -77,12 +81,17 @@ def compute_bins(times, interval_sec):
 
 def compute_periodicity(times, bin_idx, n_intervals, t0, interval_sec,
                          period_min_ms, period_max_ms, period_step_ms):
-    """Compute the Rayleigh Z score for each (time interval, candidate
-    period) cell, using bins already computed by `compute_bins`.
+    """Compute the Rayleigh Z score and mean resultant-vector phase for
+    each (time interval, candidate period) cell, using bins already
+    computed by `compute_bins`.
 
     `times` must already be sorted (as `compute_bins` returns via
-    `sort_order`). Returns (Z, periods_ms) where Z has shape
-    (n_intervals, n_periods) and periods_ms is 1D (ms).
+    `sort_order`). Returns (Z, periods_ms, phase_deg) where Z and
+    phase_deg have shape (n_intervals, n_periods) and periods_ms is 1D
+    (ms). phase_deg is the resultant vector's angle atan2(S, C) in
+    degrees - where in the candidate period's cycle clicks cluster,
+    complementing Z's "how strongly". Empty bins get C = S = 0, and
+    atan2(0, 0) is 0 with no warning, so they naturally read phase = 0.
     """
     t_rel = times - t0
 
@@ -98,15 +107,17 @@ def compute_periodicity(times, bin_idx, n_intervals, t0, interval_sec,
     periods_sec = periods_ms / 1000.0
 
     Z = np.empty((n_intervals, periods_ms.size), dtype=np.float64)
+    phase_deg = np.empty((n_intervals, periods_ms.size), dtype=np.float64)
     for j, period in enumerate(periods_sec):
-        phase = 2.0 * np.pi * np.mod(t_rel, period) / period
-        C = np.bincount(bin_idx, weights=np.cos(phase),
+        click_phase = 2.0 * np.pi * np.mod(t_rel, period) / period
+        C = np.bincount(bin_idx, weights=np.cos(click_phase),
                          minlength=n_intervals)
-        S = np.bincount(bin_idx, weights=np.sin(phase),
+        S = np.bincount(bin_idx, weights=np.sin(click_phase),
                          minlength=n_intervals)
         Z[:, j] = (C ** 2 + S ** 2) / counts_safe
+        phase_deg[:, j] = np.degrees(np.arctan2(S, C))
 
-    return Z, periods_ms
+    return Z, periods_ms, phase_deg
 
 
 def compute_noise_levels(levels, sort_order, bin_idx, n_intervals):
@@ -143,7 +154,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Compute a Rayleigh-test periodicity grid, noise "
                      "floor, and mean mid frequency from combined click "
-                     "detections, saved for click_periodicity_plot.py to "
+                     "detections, saved for click_s2_plot_results.py to "
                      "render."
     )
     parser.add_argument("input", nargs="?", default="click_s1.npz",
@@ -185,7 +196,7 @@ def main():
         times, args.interval_sec)
     times_sorted = times[sort_order]
 
-    Z, periods_ms = compute_periodicity(
+    Z, periods_ms, phase_deg = compute_periodicity(
         times_sorted, bin_idx, n_intervals, t0, args.interval_sec,
         args.period_min_ms, args.period_max_ms, args.period_step_ms)
     print(f"Computed Z scores: {Z.shape[0]} intervals x {Z.shape[1]} "
@@ -201,6 +212,7 @@ def main():
                   noise_level=noise.astype(np.float16),
                   mf=mean_mf.astype(np.float32),
                   periods_ms=periods_ms.astype(np.float16),
+                  phase=phase_deg.astype(np.float16),
                   t0=np.float64(t0),
                   interval_sec=np.float64(args.interval_sec))
 
