@@ -7,10 +7,13 @@ log files into a single .npz file, ordered chronologically using the
 timestamp embedded in each filename (...YYMMDDHHMMSS.bcl).
 
 The output file has three arrays, one row per detection:
-    time  - float64 Unix seconds (rtime + mticks/1e6), true UTC, microsecond
-            precision. Note: the .bcl filenames are timestamped in local
-            time instead (~12h offset, NZ standard time) - don't confuse
-            the two.
+    t     - datetime64[us] (rtime + mticks/1e6, converted from Unix
+            seconds), true UTC, microsecond precision. Note: the .bcl
+            filenames are timestamped in local time instead (~12h offset,
+            NZ standard time) - don't confuse the two. Downstream modules
+            that need numeric arithmetic on it (e.g. click_s2.py's/
+            click_s2_b.py's Rayleigh test) convert it back to float64 Unix
+            epoch seconds via datetime64_to_epoch_seconds().
     level - float64 noise level in centibels at time of detection
     mf    - float64 "mid frequency" in Hz, computed via FFT on the
             detection's audio snippet from the matching .dwv file (same
@@ -46,8 +49,9 @@ import pandas as pd
 
 COLUMNS = ["rtime", "mticks", "report", "state", "nl", "thr", "scnt"]
 
-# In-memory record layout: little-endian float64 time, level, mid frequency.
-DTYPE = np.dtype([("time", "<f8"), ("level", "<f8"), ("mf", "<f8")])
+# In-memory record layout: microsecond-resolution datetime64 t, plus
+# little-endian float64 level and mid frequency.
+DTYPE = np.dtype([("t", "datetime64[us]"), ("level", "<f8"), ("mf", "<f8")])
 
 # Each .dwv snippet is a fixed-length window of audio around one detection.
 SNIPPET_LEN = 864
@@ -177,14 +181,29 @@ def read_detections(path, mf_method="peak", stats=None):
 
 def load_clicks(path):
     """Read back a combined clicks file written by this script into a
-    structured numpy array with 'time', 'level', and 'mf' fields."""
+    structured numpy array with 't' (datetime64[us]), 'level', and 'mf'
+    fields."""
     with np.load(path) as d:
-        time, level, mf = d["time"], d["level"], d["mf"]
-    arr = np.empty(time.shape[0], dtype=DTYPE)
-    arr["time"] = time
+        t, level, mf = d["t"], d["level"], d["mf"]
+    arr = np.empty(t.shape[0], dtype=DTYPE)
+    arr["t"] = t
     arr["level"] = level
     arr["mf"] = mf
     return arr
+
+
+def epoch_seconds_to_datetime64(seconds):
+    """Convert float64 Unix epoch seconds (fractional/microsecond part
+    allowed) to a datetime64[us] array."""
+    return (np.round(np.asarray(seconds, dtype=np.float64) * 1_000_000)
+            .astype(np.int64).astype("datetime64[us]"))
+
+
+def datetime64_to_epoch_seconds(t):
+    """Convert a datetime64[us] array (as stored in click_s1.npz's 't'
+    field) back to float64 Unix epoch seconds, for numeric/arithmetic use
+    downstream (e.g. click_s2.py's/click_s2_b.py's Rayleigh test)."""
+    return t.astype("datetime64[us]").astype(np.int64) / 1_000_000.0
 
 
 def convert(folder, output, max_files=None, pattern="*.bcl",
@@ -230,8 +249,9 @@ def convert(folder, output, max_files=None, pattern="*.bcl",
     mfs = np.concatenate(all_mfs) if all_mfs else np.empty(0)
     # Write via an open file handle (not a bare path) so numpy doesn't
     # append its default .npz suffix if `output` doesn't already have one.
+    t = epoch_seconds_to_datetime64(times)
     with open(output, "wb") as f:
-        np.savez(f, time=times, level=levels, mf=mfs)
+        np.savez(f, t=t, level=levels, mf=mfs)
 
     print(f"Wrote {total_detections} detections to {output} "
           f"({os.path.getsize(output)} bytes)")

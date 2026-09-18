@@ -69,7 +69,7 @@ import os
 
 import numpy as np
 
-from click_s1 import load_clicks
+from click_s1 import load_clicks, datetime64_to_epoch_seconds
 
 
 def compute_bins(times, interval_sec):
@@ -207,7 +207,7 @@ def main():
     arr = load_clicks(args.input)
     if arr.size == 0:
         raise SystemExit(f"No records found in {args.input}")
-    times = arr["time"]
+    times = datetime64_to_epoch_seconds(arr["t"])
     levels = arr["level"]
     mfs = arr["mf"]
 

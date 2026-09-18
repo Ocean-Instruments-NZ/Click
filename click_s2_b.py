@@ -2,10 +2,9 @@
 """
 click_s2_b.py
 
-Combine click_s2.py's periodicity/frequency analysis and click_s3.py's
-detection-positive-minutes (DPM) / call-type reporting into a single
-in-memory pass over click_s1.npz - no intermediate click_s2.npz file is
-written or read. Writes one CSV report, click_s2_b_out.csv by default.
+Use output of click_s1.py to calculate detection-positive-minutes (DPM) 
+
+Writes one CSV report, click_s2_b_out.csv by default.
 
 Rayleigh test: for a candidate period T, fold each click time t to a phase
     phase = 2*pi * (t mod T) / T
@@ -14,11 +13,7 @@ sum(sin(phase)), n = number of clicks. Large Z indicates clicks cluster at a
 consistent phase within that interval, i.e. periodic clicking near period T.
 Nothing in this module's output ever needs Z's actual magnitude, only
 whether it crosses --threshold, so Z is thresholded immediately after each
-candidate period is computed and only a boolean exceeds-matrix is kept -
-unlike click_s2.py, which saves the real Z values for click_s2_plot_results.py's
-heatmap and click_periodicity_ici.py's per-bin max-Z column, this module has
-no such consumer, so keeping only the boolean result cuts memory use ~8x
-for the largest array this module holds (1 byte/cell vs float64's 8).
+candidate period is computed and only a boolean exceeds-matrix is kept.
 
 Analysis windows are --interval-sec wide but overlap by 50%, stepping every
 --interval-sec/2 - so most clicks fall in two consecutive, overlapping
@@ -69,11 +64,22 @@ valid mf.
 Note: click times are true UTC (see click_s1.py) - the output datetime
 column is explicitly UTC-labeled.
 
+--freq-min-khz/--freq-max-khz pre-filter the input clicks (before any
+binning) to only those whose mf (mid/peak frequency, from click_s1.py)
+falls within the given range, in kHz - either bound alone is enough to
+activate filtering. A click with NaN mf (missing/mismatched .dwv
+snippet, or an unsaved detection) is excluded whenever a filter is
+active, since its frequency can't be confirmed to be in range - this is
+a real behavior change for those clicks versus running with no filter,
+where they still contribute to periodicity/DPM despite their unknown
+frequency.
+
 Usage:
     python click_s2_b.py [click_s1.npz] [--interval-sec 2]
         [--period-min-ms 40] [--period-max-ms 60] [--period-step-ms 2]
-        [--max-days N] [--threshold 6.0] [--NMF_f_threshold 30]
-        [--NHF_f_threshold 100] [--omit-zero] [-o click_s2_b_out.csv]
+        [--max-days N] [--freq-min-khz N] [--freq-max-khz N]
+        [--threshold 6.0] [--NMF_f_threshold 30] [--NHF_f_threshold 100]
+        [--omit-zero] [-o click_s2_b_out.csv]
 
 Requires: numpy
 """
@@ -84,7 +90,7 @@ from datetime import timezone, datetime as dt
 
 import numpy as np
 
-from click_s1 import load_clicks
+from click_s1 import load_clicks, datetime64_to_epoch_seconds
 
 BUCKET_SECONDS = 3600  # hardcoded to hourly reporting buckets
 
@@ -194,6 +200,20 @@ def compute_mean_mf(mf, click_idx, bin_idx, n_intervals):
         return sums / np.where(counts == 0, np.nan, counts)
 
 
+def filter_by_frequency(times, mf, freq_min_khz, freq_max_khz):
+    """Keep only clicks whose mf (mid/peak frequency, Hz) falls within
+    [freq_min_khz, freq_max_khz] kHz (either bound optional, inclusive).
+    Clicks with NaN mf are excluded whenever a filter is active, since
+    their frequency can't be confirmed to be in range."""
+    mf_khz = mf / 1000.0
+    mask = ~np.isnan(mf_khz)
+    if freq_min_khz is not None:
+        mask &= mf_khz >= freq_min_khz
+    if freq_max_khz is not None:
+        mask &= mf_khz <= freq_max_khz
+    return times[mask], mf[mask]
+
+
 def compute_bucket_minutes(interval_start, bin_mask, bucket_seconds):
     """Return (bucket_start, minutes): per-bucket count of minutes
     containing at least one bin where bin_mask is True."""
@@ -289,6 +309,14 @@ def main():
     parser.add_argument("--max-days", type=float, default=None,
                          help="Limit input to the first N days of click "
                               "data (default: unlimited)")
+    parser.add_argument("--freq-min-khz", type=float, default=None,
+                         help="Only process clicks with mf >= this many "
+                              "kHz; omit for no lower bound (default: no "
+                              "filter)")
+    parser.add_argument("--freq-max-khz", type=float, default=None,
+                         help="Only process clicks with mf <= this many "
+                              "kHz; omit for no upper bound (default: no "
+                              "filter)")
     parser.add_argument("--threshold", type=float, default=6.0,
                          help="Rayleigh Z threshold for a positive "
                               "detection (default: 6.0)")
@@ -310,8 +338,18 @@ def main():
     arr = load_clicks(args.input)
     if arr.size == 0:
         raise SystemExit(f"No records found in {args.input}")
-    times = arr["time"]
+    times = datetime64_to_epoch_seconds(arr["t"])
     mfs = arr["mf"]
+
+    if args.freq_min_khz is not None or args.freq_max_khz is not None:
+        before = times.size
+        times, mfs = filter_by_frequency(times, mfs, args.freq_min_khz,
+                                          args.freq_max_khz)
+        print(f"Frequency filter [{args.freq_min_khz}, {args.freq_max_khz}] "
+              f"kHz: kept {times.size}/{before} clicks")
+        if times.size == 0:
+            raise SystemExit(
+                "No records remain after applying the frequency filter")
 
     if args.max_days is not None:
         cutoff = times.min() + args.max_days * 86400.0
