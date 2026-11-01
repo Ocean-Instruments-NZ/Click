@@ -93,13 +93,3 @@ those whose `mf` is in range; either bound alone activates filtering, and clicks
 - **`load_clicks()`**: the canonical way to read `click_s1.npz`, defined in `click_s1.py`
   and reused (not duplicated) by downstream modules.
 
-## Other files in the folder
-
-- `Hydrophone/`, `pamguard/` — raw SoundTrap recorder files (`.bcl`, `.dwv`, `.sud`); very
-  large, so avoid recursive listings.
-- `CPOD Data/` — export from an independent CPOD hydrophone (hourly CSV plus raw CPOD
-  files). Nothing in the project currently reads it.
-- Leftover outputs from modules that have since been removed from the project (e.g.
-  `click_s2.npz`, `click_s2_c_*.npz`, `click_s2_d_*.npz`, `click_s3.csv`,
-  `click_periodicity.html`, `STvsCPOD.csv`, `cpod_output.csv`, `scatter_example.html`);
-  the current code does not read or regenerate them.
