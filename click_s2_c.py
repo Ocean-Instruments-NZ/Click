@@ -25,11 +25,12 @@ and compute Z = (C**2 + S**2) / n, where C = sum(cos(phase)), S =
 sum(sin(phase)), n = number of clicks. Large Z indicates clicks cluster at a
 consistent phase within that interval, i.e. periodic clicking near period T.
 
-Analysis windows are --interval-sec wide but overlap by 50%, stepping every
---interval-sec/2 - so most clicks fall in two consecutive, overlapping
-windows (each window's Rayleigh test still only sees its own window's
-clicks; a shared click is simply counted independently by each window it
-falls in).
+Analysis windows are --interval-sec wide, overlapping by --overlap (default
+50%), stepping every interval-sec * (1 - overlap) - so most clicks fall in
+more than one consecutive, overlapping window (each window's Rayleigh test
+still only sees its own window's clicks; a shared click is simply counted
+independently by each window it falls in). --overlap 0 gives non-
+overlapping windows.
 
 Note: click times are true UTC (see click_s1.py).
 
@@ -44,7 +45,7 @@ where they still contribute to periodicity despite their unknown
 frequency.
 
 Usage:
-    python click_s2_c.py [click_s1.npz] [--interval-sec 2]
+    python click_s2_c.py [click_s1.npz] [--interval-sec 2] [--overlap 0.5]
         [--period-min-ms 40] [--period-max-ms 60] [--period-step-ms 2]
         [--max-days N] [--freq-min-khz N] [--freq-max-khz N]
         [--threshold 6.0] [-o click_s2_c_out.npz]
@@ -60,41 +61,57 @@ from click_s1 import load_clicks, datetime64_to_epoch_seconds, \
     epoch_seconds_to_datetime64
 
 
-def compute_bins(times, interval_sec):
+def compute_bins(times, interval_sec, overlap=0.5):
     """Shared time-binning logic for the periodicity heatmap and mean mf,
     so both land on identical, overlapping windows.
 
-    Analysis windows are interval_sec wide, stepping every interval_sec/2
-    (50% overlap) - since window width is always exactly 2x the step, a
-    click at relative time t_rel falls in window floor(t_rel/step) and,
-    except at the very start of the data, also in the window before that.
-    Rather than teach every aggregation function about "up to 2 windows
-    per click", each click is duplicated into one (bin_idx, click) pair
-    per window it belongs to - so the existing bincount-based aggregation
-    in compute_max_z/compute_mean_mf needs no change: summing over the
-    expanded index naturally gives each window its own correct,
-    independent set of contributing clicks, some shared with a neighbor.
+    Analysis windows are interval_sec wide, stepping every
+    step_sec = interval_sec * (1 - overlap) (overlap is a fraction in
+    [0, 1); 0 means non-overlapping windows). A click at relative time
+    t_rel falls into every window k where
+    k*step_sec <= t_rel < k*step_sec + interval_sec - up to
+    ceil(interval_sec / step_sec) consecutive windows (exactly 2 when
+    overlap is 50%, as before). Rather than teach every aggregation
+    function about "up to N windows per click", each click is duplicated
+    into one (bin_idx, click) pair per window it belongs to - so the
+    existing bincount-based aggregation in compute_max_z/compute_mean_mf
+    needs no change: summing over the expanded index naturally gives each
+    window its own correct, independent set of contributing clicks, some
+    shared with neighbors.
 
     Returns (click_idx, bin_idx, n_intervals, t0, step_sec). `click_idx`
     indexes directly into the original (unsorted) times/mf arrays - e.g.
     `times[click_idx]` aligns with `bin_idx` for bincount-based
-    aggregation, and may repeat an index for a click counted in two
-    windows. step_sec = interval_sec / 2 is the spacing between
-    successive window-start times.
+    aggregation, and may repeat an index for a click counted in multiple
+    windows.
     """
     sort_order = np.argsort(times)
     times_sorted = times[sort_order]
     t0 = times_sorted[0]
     t_rel = times_sorted - t0
 
-    step_sec = interval_sec / 2.0
+    step_sec = interval_sec * (1.0 - overlap)
     bin_hi = np.floor(t_rel / step_sec).astype(np.int64)
-    bin_lo = bin_hi - 1  # the earlier of the two overlapping windows
     n_intervals = int(bin_hi[-1]) + 1
 
-    valid_lo = bin_lo >= 0  # false only for the earliest clicks
-    click_idx = np.concatenate([sort_order, sort_order[valid_lo]])
-    bin_idx = np.concatenate([bin_hi, bin_lo[valid_lo]])
+    # bin_hi (offset 0) always contains its click by construction. A
+    # click may also fall into up to windows_per_click - 1 earlier
+    # windows - checked explicitly (rather than assumed from the
+    # candidate index alone) since that count is only a fixed 2 when
+    # overlap is exactly 50%.
+    windows_per_click = int(np.ceil(interval_sec / step_sec))
+    click_idx_parts = [sort_order]
+    bin_idx_parts = [bin_hi]
+    for offset in range(1, windows_per_click):
+        candidate_bin = bin_hi - offset
+        window_start = candidate_bin * step_sec
+        contains = ((candidate_bin >= 0) & (t_rel >= window_start) &
+                    (t_rel < window_start + interval_sec))
+        click_idx_parts.append(sort_order[contains])
+        bin_idx_parts.append(candidate_bin[contains])
+
+    click_idx = np.concatenate(click_idx_parts)
+    bin_idx = np.concatenate(bin_idx_parts)
 
     return click_idx, bin_idx, n_intervals, t0, step_sec
 
@@ -191,8 +208,12 @@ def main():
                               "(default: click_s1.npz)")
     parser.add_argument("--interval-sec", type=float, default=2.0,
                          help="Analysis window width in seconds; windows "
-                              "overlap 50%%, stepping every "
-                              "interval-sec/2 (default: 2.0)")
+                              "step every interval-sec * (1 - overlap) "
+                              "(default: 2.0)")
+    parser.add_argument("--overlap", type=float, default=0.5,
+                         help="Fractional overlap between consecutive "
+                              "analysis windows, in [0, 1) - 0 means "
+                              "non-overlapping windows (default: 0.5)")
     parser.add_argument("--period-min-ms", type=float, default=40.0,
                          help="Minimum candidate period in ms (default: 40)")
     parser.add_argument("--period-max-ms", type=float, default=60.0,
@@ -217,6 +238,9 @@ def main():
                          help="Output npz path (default: "
                               "click_s2_c_out.npz)")
     args = parser.parse_args()
+
+    if not (0.0 <= args.overlap < 1.0):
+        raise SystemExit("--overlap must be in the range [0, 1)")
 
     arr = load_clicks(args.input)
     if arr.size == 0:
@@ -245,9 +269,9 @@ def main():
           f"{(times.max() - times.min()) / 86400.0:.2f} days")
 
     click_idx, bin_idx, n_intervals, t0, step_sec = compute_bins(
-        times, args.interval_sec)
+        times, args.interval_sec, args.overlap)
     print(f"Using {args.interval_sec:.1f}s analysis windows stepped every "
-          f"{step_sec:.1f}s (50% overlap)")
+          f"{step_sec:.3f}s ({args.overlap * 100:.0f}% overlap)")
     times_expanded = times[click_idx]
 
     Zh, ici_ms, periods_ms = compute_max_z(
@@ -258,7 +282,7 @@ def main():
 
     mean_mf = compute_mean_mf(mfs, click_idx, bin_idx, n_intervals)
     interval_start = t0 + np.arange(n_intervals) * step_sec
-    interval_mid = interval_start + step_sec  # window midpoint (width = 2 * step_sec)
+    interval_mid = interval_start + args.interval_sec / 2.0  # window midpoint
 
     mask = Zh > args.threshold
     t = epoch_seconds_to_datetime64(interval_mid[mask])
