@@ -1,4 +1,32 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026, Ocean Instruments NZ
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+# 1. Redistributions of source code must retain the above copyright notice, this
+#    list of conditions and the following disclaimer.
+#
+# 2. Redistributions in binary form must reproduce the above copyright notice,
+#    this list of conditions and the following disclaimer in the documentation
+#    and/or other materials provided with the distribution.
+#
+# 3. Neither the name of the copyright holder nor the names of its
+#    contributors may be used to endorse or promote products derived from
+#    this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
 """
 click_s1.py
 
@@ -18,11 +46,10 @@ The output file has three arrays, one row per detection:
     mf    - float64 "mid frequency" in Hz, computed via FFT on the
             detection's audio snippet from the matching .dwv file (same
             basename as the .bcl, one 864-sample snippet per saved
-            detection, concatenated). Either the peak-power frequency bin
-            (--mf-method peak, default) or the frequency splitting the
-            power spectrum's energy 50/50 (--mf-method median). NaN where
-            no snippet is available (missing .dwv, snippet not saved for
-            that detection, or a snippet-count mismatch for that file).
+            detection, concatenated). The frequency of the peak-power bin.
+            NaN where no snippet is available (missing .dwv, snippet not
+            saved for that detection, or a snippet-count mismatch for that
+            file).
 
 All detections are accumulated in memory and written in a single np.savez()
 call at the end - the full dataset is only a few MB, so this is simpler
@@ -30,8 +57,7 @@ than streaming, unlike the .npz format itself, which doesn't support the
 same kind of incremental/chunked append a flat binary file would.
 
 Usage:
-    python click_s1.py [folder] [-o output.npz] [--max-files N]
-                        [--mf-method {peak,median}]
+    python click_s1.py input_folder [-o output.npz] [--max-files N]
 
 Requires: pandas, numpy
 """
@@ -71,13 +97,13 @@ def parse_filename_timestamp(path):
         return None
 
 
-def find_sorted_files(folder, pattern="*.bcl"):
-    """Glob matching files and sort them chronologically by the timestamp
-    embedded in their filename. Files whose name doesn't match the expected
-    pattern are skipped with a warning."""
-    paths = glob.glob(os.path.join(folder, pattern))
+def find_sorted_files(input_folder):
+    """Glob the folder's *.bcl files and sort them chronologically by the
+    timestamp embedded in their filename. Files whose name doesn't match
+    the expected pattern are skipped with a warning."""
+    paths = glob.glob(os.path.join(input_folder, "*.bcl"))
     if not paths:
-        sys.exit(f"No files matching '{pattern}' found in {folder}")
+        sys.exit(f"No *.bcl files found in {input_folder}")
 
     dated = []
     for p in paths:
@@ -115,27 +141,18 @@ def read_snippets(dwv_path):
         return None, None
 
 
-def compute_mf(snippets, sample_rate, method="peak"):
-    """Vectorized "mid frequency" (Hz) for every snippet at once via FFT.
-    method="peak": frequency of the highest-power bin.
-    method="median": frequency splitting the power spectrum's energy 50/50.
-    The DC bin (0 Hz) is excluded from both, since a click's spectral
-    content is never there and any DC offset in the raw samples would
-    otherwise dominate the result."""
+def compute_mf(snippets, sample_rate):
+    """Vectorized "mid frequency" (Hz) for every snippet at once via FFT:
+    the frequency of the highest-power bin. The DC bin (0 Hz) is excluded,
+    since a click's spectral content is never there and any DC offset in
+    the raw samples would otherwise dominate the result."""
     freqs = np.fft.rfftfreq(SNIPPET_LEN, d=1.0 / sample_rate)
     power = np.abs(np.fft.rfft(snippets, axis=1)) ** 2
     freqs, power = freqs[1:], power[:, 1:]
-
-    if method == "peak":
-        idx = np.argmax(power, axis=1)
-    else:
-        cumulative = np.cumsum(power, axis=1)
-        half = cumulative[:, -1] * 0.5
-        idx = (cumulative >= half[:, None]).argmax(axis=1)
-    return freqs[idx]
+    return freqs[np.argmax(power, axis=1)]
 
 
-def read_detections(path, mf_method="peak", stats=None):
+def read_detections(path, stats=None):
     """Read a single .bcl file and return (time, level, mf) float64 arrays
     for its detection ('D') rows only. `mf` is computed via FFT on the
     matching .dwv file's audio snippets (NaN where unavailable). `stats`,
@@ -174,7 +191,7 @@ def read_detections(path, mf_method="peak", stats=None):
         if stats is not None:
             stats["mismatched_dwv"] += 1
     elif snippets.shape[0] > 0:
-        mf[saved] = compute_mf(snippets, sample_rate, mf_method)
+        mf[saved] = compute_mf(snippets, sample_rate)
 
     return time, level, mf
 
@@ -206,9 +223,8 @@ def datetime64_to_epoch_seconds(t):
     return t.astype("datetime64[us]").astype(np.int64) / 1_000_000.0
 
 
-def convert(folder, output, max_files=None, pattern="*.bcl",
-            mf_method="peak"):
-    files = find_sorted_files(folder, pattern)
+def convert(input_folder, output, max_files=None):
+    files = find_sorted_files(input_folder)
     print(f"Found {len(files)} files with recognizable timestamps.")
 
     if max_files is not None and len(files) > max_files:
@@ -225,7 +241,7 @@ def convert(folder, output, max_files=None, pattern="*.bcl",
 
     for i, path in enumerate(files, 1):
         try:
-            time, level, mf = read_detections(path, mf_method, stats)
+            time, level, mf = read_detections(path, stats)
         except Exception as exc:
             print(f"  skipping {os.path.basename(path)}: {exc}",
                   file=sys.stderr)
@@ -270,29 +286,18 @@ def main():
         description="Combine .bcl click detections into a single .npz "
                      "file, ordered chronologically by filename timestamp."
     )
-    parser.add_argument("folder", nargs="?", default="Hydrophone",
-                         help="Folder containing .bcl files (default: "
-                              "Hydrophone)")
+    parser.add_argument("input_folder",
+                         help="Folder containing .bcl files (required)")
     parser.add_argument("-o", "--output", default="click_s1.npz",
                          help="Output .npz file (default: click_s1.npz)")
-    parser.add_argument("--pattern", default="*.bcl",
-                         help="Glob pattern for input files (default: *.bcl)")
     parser.add_argument("--max-files", type=int, default=None,
                          help="Maximum number of input files to process, "
                               "in chronological order (default: unlimited)")
-    parser.add_argument("--mf-method", choices=("peak", "median"),
-                         default="peak",
-                         help="How to compute the mf field from each "
-                              "detection's .dwv snippet: peak-power "
-                              "frequency bin, or the frequency splitting "
-                              "the power spectrum's energy 50/50 "
-                              "(default: peak)")
     args = parser.parse_args()
 
     import time as time_module
     t0 = time_module.time()
-    convert(args.folder, args.output, args.max_files, args.pattern,
-            args.mf_method)
+    convert(args.input_folder, args.output, args.max_files)
     print(f"Done in {time_module.time() - t0:.1f}s")
 
 
