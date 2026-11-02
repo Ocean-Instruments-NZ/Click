@@ -45,8 +45,9 @@ The output file has three arrays, one row per detection:
     level - float64 noise level in centibels at time of detection
     mf    - float64 "mid frequency" in Hz, computed via FFT on the
             detection's audio snippet from the matching .dwv file (same
-            basename as the .bcl, one 864-sample snippet per saved
-            detection, concatenated). The frequency of the peak-power bin.
+            basename as the .bcl, one fixed-length snippet per saved
+            detection, concatenated; length set by --snippet-len). The
+            frequency of the peak-power bin.
             NaN where no snippet is available (missing .dwv, snippet not
             saved for that detection, or a snippet-count mismatch for that
             file).
@@ -58,6 +59,7 @@ same kind of incremental/chunked append a flat binary file would.
 
 Usage:
     python click_s1.py input_folder [-o output.npz] [--max-files N]
+                       [--snippet-len N]
 
 Requires: pandas, numpy
 """
@@ -80,7 +82,8 @@ COLUMNS = ["rtime", "mticks", "report", "state", "nl", "thr", "scnt"]
 DTYPE = np.dtype([("t", "datetime64[us]"), ("level", "<f8"), ("mf", "<f8")])
 
 # Each .dwv snippet is a fixed-length window of audio around one detection.
-SNIPPET_LEN = 864
+# Default length in samples; override with --snippet-len.
+DEFAULT_SNIPPET_LEN = 864
 
 FNAME_TS_RE = re.compile(r"\.(\d{12})\.bcl$", re.IGNORECASE)
 
@@ -121,11 +124,11 @@ def find_sorted_files(input_folder):
     return [p for _, p in dated]
 
 
-def read_snippets(dwv_path):
+def read_snippets(dwv_path, snippet_len):
     """Read all fixed-length audio snippets from a .dwv file. Returns
     (sample_rate, snippets) where snippets has shape (n_snippets,
-    SNIPPET_LEN), or (None, None) if the file is missing, unreadable, or
-    its sample count isn't a whole multiple of SNIPPET_LEN (better to skip
+    snippet_len), or (None, None) if the file is missing, unreadable, or
+    its sample count isn't a whole multiple of snippet_len (better to skip
     than risk misaligned snippets)."""
     if not os.path.exists(dwv_path):
         return None, None
@@ -134,9 +137,9 @@ def read_snippets(dwv_path):
             sample_rate = w.getframerate()
             raw = w.readframes(w.getnframes())
         samples = np.frombuffer(raw, dtype="<i2")
-        if samples.size == 0 or samples.size % SNIPPET_LEN != 0:
+        if samples.size == 0 or samples.size % snippet_len != 0:
             return None, None
-        return sample_rate, samples.reshape(-1, SNIPPET_LEN)
+        return sample_rate, samples.reshape(-1, snippet_len)
     except (wave.Error, OSError):
         return None, None
 
@@ -146,16 +149,17 @@ def compute_mf(snippets, sample_rate):
     the frequency of the highest-power bin. The DC bin (0 Hz) is excluded,
     since a click's spectral content is never there and any DC offset in
     the raw samples would otherwise dominate the result."""
-    freqs = np.fft.rfftfreq(SNIPPET_LEN, d=1.0 / sample_rate)
+    freqs = np.fft.rfftfreq(snippets.shape[1], d=1.0 / sample_rate)
     power = np.abs(np.fft.rfft(snippets, axis=1)) ** 2
     freqs, power = freqs[1:], power[:, 1:]
     return freqs[np.argmax(power, axis=1)]
 
 
-def read_detections(path, stats=None):
+def read_detections(path, snippet_len=DEFAULT_SNIPPET_LEN, stats=None):
     """Read a single .bcl file and return (time, level, mf) float64 arrays
     for its detection ('D') rows only. `mf` is computed via FFT on the
-    matching .dwv file's audio snippets (NaN where unavailable). `stats`,
+    matching .dwv file's `snippet_len`-sample audio snippets (NaN where
+    unavailable). `stats`,
     if given, is a dict of counters updated in place for a summary report
     (missing_dwv, mismatched_dwv) rather than printing per file."""
     df = pd.read_csv(
@@ -183,7 +187,7 @@ def read_detections(path, stats=None):
     mf = np.full(len(det), np.nan, dtype=np.float64)
 
     dwv_path = os.path.splitext(path)[0] + ".dwv"
-    sample_rate, snippets = read_snippets(dwv_path)
+    sample_rate, snippets = read_snippets(dwv_path, snippet_len)
     if snippets is None:
         if stats is not None:
             stats["missing_dwv"] += 1
@@ -223,7 +227,8 @@ def datetime64_to_epoch_seconds(t):
     return t.astype("datetime64[us]").astype(np.int64) / 1_000_000.0
 
 
-def convert(input_folder, output, max_files=None):
+def convert(input_folder, output, max_files=None,
+            snippet_len=DEFAULT_SNIPPET_LEN):
     files = find_sorted_files(input_folder)
     print(f"Found {len(files)} files with recognizable timestamps.")
 
@@ -241,7 +246,7 @@ def convert(input_folder, output, max_files=None):
 
     for i, path in enumerate(files, 1):
         try:
-            time, level, mf = read_detections(path, stats)
+            time, level, mf = read_detections(path, snippet_len, stats)
         except Exception as exc:
             print(f"  skipping {os.path.basename(path)}: {exc}",
                   file=sys.stderr)
@@ -293,11 +298,18 @@ def main():
     parser.add_argument("--max-files", type=int, default=None,
                          help="Maximum number of input files to process, "
                               "in chronological order (default: unlimited)")
+    parser.add_argument("--snippet-len", type=int,
+                         default=DEFAULT_SNIPPET_LEN,
+                         help="Length in samples of each audio snippet in "
+                              "the .dwv files (default: "
+                              f"{DEFAULT_SNIPPET_LEN})")
     args = parser.parse_args()
+    if args.snippet_len < 1:
+        parser.error("--snippet-len must be a positive integer")
 
     import time as time_module
     t0 = time_module.time()
-    convert(args.input_folder, args.output, args.max_files)
+    convert(args.input_folder, args.output, args.max_files, args.snippet_len)
     print(f"Done in {time_module.time() - t0:.1f}s")
 
 

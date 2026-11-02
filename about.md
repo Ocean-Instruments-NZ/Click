@@ -30,17 +30,19 @@ Requires: Python 3 with `numpy` and `pandas` (`pandas` is only used by `click_s1
 
 ### `click_s1.py` — the entry point
 
-Usage: `python click_s1.py input_folder [-o output.npz] [--max-files N]`
+Usage: `python click_s1.py input_folder [-o output.npz] [--max-files N] [--snippet-len N]`
 
 Reads every `*.bcl` file in `input_folder` (required; sorted chronologically by the
 timestamp embedded in each filename) and combines all detections into a single `.npz`
 file, `click_s1.npz` by default. `--max-files` limits the run to the first N files.
+`--snippet-len` sets the length in samples of each audio snippet in the `.dwv` files
+(default 864).
 Three arrays, one row per detection:
 - `t` — true UTC, `datetime64[us]` (microsecond precision)
 - `level` — noise level in centibels at the time of detection
 - `mf` — "mid frequency" in Hz: the peak-power frequency (DC bin excluded) from an FFT of
-  the detection's audio snippet in the matching `.dwv` file (one 864-sample snippet per
-  saved detection). `NaN` where no snippet is available (missing `.dwv`, snippet not saved
+  the detection's audio snippet in the matching `.dwv` file (one `--snippet-len`-sample
+  snippet per saved detection). `NaN` where no snippet is available (missing `.dwv`, snippet not saved
   for that detection, or a snippet-count mismatch for that file).
 
 All detections are accumulated in memory and written in a single `np.savez()` call at the
