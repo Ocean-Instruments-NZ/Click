@@ -1,16 +1,13 @@
 # About this project
 
-Tools for processing SoundTrap hydrophone click-detector output (`Hydrophone/*.bcl` +
+Tools for processing SoundTrap hydrophone click-detector output (`*.bcl` +
 `*.dwv`) into cetacean detection reports: raw click detections are combined into one
 file, then analysed for periodic click trains (echolocation) and summarised as
 detection-positive minutes.
 
 All click times are true UTC throughout this pipeline. Note: `.bcl`/`.dwv` **filenames**
-are timestamped in local time instead (~12h offset, NZ standard time) — an easy source of
+are timestamped in local time instead — an easy source of
 confusion, called out in the module docstrings.
-
-Both modules are released under the BSD 3-Clause license (Copyright (c) 2026, Ocean
-Instruments NZ); the license text is at the top of each `.py` file.
 
 ## Pipeline overview
 
